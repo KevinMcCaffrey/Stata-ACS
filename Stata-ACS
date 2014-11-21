@@ -1,0 +1,1014 @@
+***ACS DATA PREPARATION AND ANALYSIS TOOL
+	*by Kevin McCaffrey, April 2014, Updated August 2014
+	*Stata v. 11.2
+
+**This DO file creates a panel dataset with multiple years and geographies out of downloaded ACS data.
+	*The new dataset can then be used in Stata or in Excel from the CSV file that this program produces.
+
+/*
+
+Instructions:
+1. Go to American Fact Finder and select the following geographies: New York City, All counties in New York State, 
+	and all PUMAs in New York State.
+2. Choose the ACS tables you want from American Fact Finder and download multiple years of 1-year sample
+	by one of the following ways:
+	a. Select from the search results using the check boxes at the left of each row. 
+		-You can select multiple years of 1-year sample at the same tmie.
+	b. View the tables you want to see (one year at a time) and select download. Click to approve if a dialog box appears.	
+		
+			**IMPORTANT**
+		
+		- For settings choose, in the box for "Comma delimited (.csv) format (data rows only)",
+			--"Data and annotations in a single file" and "Include descriptive data element names" 
+	
+			*If you don't download the descriptive data element names (variable descriptions), 
+				*this Stata program is designed to still work, but graphs will have undescriptive titles and names (variable number only),
+				*and Margin of Error variables will not be deleted.	
+
+3. This file creates graphs based on population. If you want to have these graphs, download table B01003 as described in (2.) above.
+	
+4. Unzip all files and move them into one folder, the one that will be used as your working directory.
+	(It doesn't matter than there are extra files that get unzipped. 
+		This Stata program will use the right ones and organize them.)
+	
+5. Set your working directory (where the data files are) using Stata's cd command. Example:
+	cd "O:\RESEARCH\kmccaffrey\ACS_Stata_Program\Poverty"
+	You can do it from the command line	or within the DO file. 
+		See the place for it near the beginning of the code.
+	
+6. Run this program.(Stata commands "Do" or "Run" are both fine.) It can be run all at once
+	or the graphing part can be skipped or run separately.
+	
+	
+Program output:
+
+1. A panel dataset with all downloaded data (all selected NYS geographies) called appended_dataset.dta
+2. The main panel dataset that you will use with only NYC geographies (whole city, boroughs, PUMAs)
+3. A copy of that dataset based on percentages of total population of each geography
+4. A CSV file of the NYC panel dataset
+5. A copy of that CSV file based on percentages of total population of each geography
+4. Time-series and cross-sectional graphs for initial analysis in a separate folder called "Graphs"
+
+
+Possible errors:
+
+1. Error: "system limit exceeded -- width shortage"
+		An attempt was made to add a variable that would have increased the memory
+		required to store an observation beyond 24576 bytes, the maximum width allowed.
+
+	There is too much information across the width of the CSV file from ACS; in practice it means too many variables.
+	This is likely to occur with summary tables beginning in "S"
+	This could also occur from attempting to merge too many different tables. 
+		Appending multiple years of the same table has no relationship to this error.
+	
+	Solution: Go into the .csv files from ACS and delete columns that aren't needed, such as Margin of Error columns.
+		Then try running the DO file again.
+		This error came up while trying to import ACS table S1701, which had 279 columns. 
+			After deleting all of the Margin of Error columns, it imported fine.
+
+2. Error: "repeated time values within panel"
+
+	You likely have multiple sample lengths in the dataset (e.g., 1-Year and 3-Year together).
+	The dataset is probably assembled and saved properly at this point, but the graphs section that comes after that
+		will behave incorrectly if you have multiple sample lengths in the dataset
+	
+	Solution: Your dataset might be fine but just contains different sample lenghts. Be careful of that 
+		in any analysis. If you want to run the graphs, separate the .csv files for the different sample lengths
+		into different folders and rerun the whole program for each folder.
+		
+			
+Other issues:
+The variable descriptions are limited to 80 characters, and for some long ACS variable descriptions,
+	80 characters might not be long enough to distinguish different variables. In that case, refer 
+	to the metadata file. The descriptions are also stored under a characteristic for each variable
+	called "description". This is viewable by typing:
+	char list varname[description]
+	where varname is the name of the variable, for example hc01_vc01.
+	However, when it is displayed on the screen, it doesn't wrap lines, so maximize the window.
+
+This program was created with 1-year samples in mind. It allows for and identifies other sample lengths
+	but doesn't keep them separated when running the graphs. If running the graphs, make sure only samples
+	of the same length are included in the dataset.
+
+*/
+
+
+clear
+version 11.2
+set mem 2000m
+
+*Set the directory to where the downloaded files are. Copy the path after the cd below. Use quotes around the path.
+cd 
+*Example: cd "O:\RESEARCH\kmccaffrey\ACS_Stata_Program\Download Test"
+
+capture log close
+log using ACS_Panel_Data_Building.txt, text append
+
+**RUN THIS NEXT SECTION ONCE EITHER BEFORE OR AT THE SAME TIME AS THE REST OF THE DO FILE
+	*(Running it before or at the same time as the rest makes no difference.)
+*This is a callable subroutine (program) to remove special characters (ones that can't be used in file names) 
+	*This is used to clean variable labels to be used in graph file names.
+
+capture program drop strclean
+program define strclean, sclass
+	args original_text
+	
+	foreach char in "/"	"\" ":" "*" "?" `"""' "<" ">" "|" {
+		local original_text: subinstr local original_text `"`char'"' "_",	all
+		*display `"`original_text'"'
+	}
+	
+	display `"Label changed to: `original_text'"'
+	sreturn local text_rename = `"`original_text'"'
+end	
+
+
+
+**THIS SECTION CREATES YEARLY STATA FILES FROM SEPARATE CSV FILES
+
+	
+set more off
+*Identify all the CSV files ending in "with_ann" in the working directory and ignore others, such as metadata
+local datafiles : dir . files  "*with_ann.csv"
+
+
+*Open each file, handle variable labels, add year, save in DTA format
+foreach file in `datafiles' {
+	clear
+	display "Cleared"
+	insheet using `file', names
+	display "Insheet Completed"
+
+	*Check to see if the variable descriptions were imported. 
+		*If so, the field geoid2 will be a string (text) field. 
+			*A numeric value likely means that the variable labels weren't imported.
+	local geoid2_type : type geoid2
+	display "`geoid2_type'"
+
+	*If it appears that the variable descriptions were imported, make them the variable labels
+	if strmatch("`geoid2_type'", "str*") == 1 {
+		
+		display "Converting Row 1 to variable labels and [description] characteristics."
+		
+		foreach var of varlist _all {
+			display `"Now on `var'"'
+						
+			*Capture the value of each variable from the first row (variable description)
+			levelsof `var' in 1, local(var_info)
+						
+			*Shorten the variable description by removing "Estimate; "
+				*It could also be programmed in to remove the final colon from those labels that have it,
+					*but that colon indicates that the variable is further broken down by other variables.
+			local var_desc : subinstr local var_info "Estimate; " "", all
+			
+			*Make the new description the variable label (max 80 characters)
+			label variable `var' `var_desc'
+			
+			*Optional two lines for viewing the progress of the code
+				*local var_label : variable label `var'
+				*display `"The variable label for `var' is: `var_label'"'
+			
+			*Make the new description a variable characteristic called "description".
+			char `var'[description] `var_desc'
+			
+			*Optional two lines for viewing the progress of the code
+				*local var_char : char `var'[description]
+				*display `"The description characteristic for `var' is: `var_char'"' 
+
+		}
+
+		drop in 1
+		
+		*Change most variables to numeric form"
+		display "Changing most variables to numeric form"
+		foreach var of varlist _all {
+		
+			if inlist("`var'", "geoid", "geodisplaylabel") == 0 {
+				destring `var', replace force // Any non numeric characters, such as * for footnotes, will be removed
+				format `var' %15.0f // Set the format to avoid scientific notation
+			}	
+		}
+	}
+
+	else {
+
+		display "Row 1 of geoid2 includes a number and not a text string," 	///
+			"so it appears that the variable labels are not in the dataset."
+		display "Not converting Row 1 to variable labels."
+
+		*The graphs use the information stored in the variable charactistic called "description".
+			*If the metadata wasn't included in the data .csv file, the variable name, e.g. hd01_vd01, will be used instead.
+		foreach var of varlist _all {
+			display `"Now on `var'"'
+			char `var'[description] `var'
+
+			*The following -destring- is probably not necessary, since this -else- block is for non-string variables
+			if inlist("`var'", "geoid", "geodisplaylabel") == 0 {
+				destring `var', replace force
+				format `var' %15.0f // Set the format to avoid scientific notation
+			}		
+		}
+	} 
+	
+	*Create a new variable for the four-digit year, created out of the two digits from the filename that represent the year: after "ACS_"
+	gen year = "20" + substr("`file'", 5, 2) 
+	label variable year "Year"
+	char year[description] "Year"
+	destring year, replace
+	format year %ty // Tell Stata 'year' is yearly
+
+	*Create a new variable for the sample length, created out of one digit from the filename that represents the sample length, 
+		*which is after the year. For 2005 and 2006, "Est" is there instead of "1YR". This identifies those as 1-year samples.
+	local sample_from_filename = substr("`file'", 8, 1)
+	display "Sample length from filename: `sample_from_filename'"
+	gen sample_yrs = cond("`sample_from_filename'" == "e", "1", "`sample_from_filename'")
+	display "Sample length set to: " sample_yrs[1]
+	label variable sample_yrs "Length of Sample (Years)"
+	char sample_yrs[description] "Length of Sample (Years)"
+	destring sample_yrs, replace
+
+	*Move 'year' and 'sample_yrs' to the front of the variable list
+	order year sample_yrs
+	
+	*Pull the table name from the file name
+	display `"`file'"'
+	local filename_truncated = subinstr(`"`file'"', `"_with_ann.csv"', "", .)
+	display `"Filename: `filename_truncated'"'
+	local table_name = substr("`filename_truncated'", 12, .)
+	display `"Table name: `table_name'"'
+	
+	*Add the table name to each variable other than the identifier variables. 
+		*This eliminatese the problem of different variables having the same variable name (number), which affects merging.
+	foreach var of varlist _all {
+	
+		if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel") == 0 {
+	
+			local var_rename = `"`var'"'+"_"+`"`table_name'"'
+			display `"`var_rename'"'
+			rename `var' `var_rename'
+		}
+	}
+	
+	*Change the variable information for the population variable to make it clearer what it is
+	capture label variable hd01_vd01_b01003 "Total Population"
+	capture char hd01_vd01_b01003[description] "Total Population"
+		
+	save `file'.dta, replace
+}
+
+
+
+**THIS SECTION APPENDS YEARLY DATASETS BASED ON THE SAME ACS TABLE
+
+
+local datafiles : dir . files  "*.csv.dta"
+display `datafiles'
+
+*Determine the ACS tables involved
+foreach active_file in `datafiles' {
+	
+	display "Active file: `active_file'"
+	local filename_truncated = subinstr(`"`active_file'"', `"_with_ann.csv.dta"', "", .)
+	local table_name = substr("`filename_truncated'", 12, .)
+	display "Current table: `table_name'"
+	local table_list `table_list' `table_name'
+	display "Table list: `table_list'"
+	
+}	
+
+local tables : list uniq table_list
+display "Unique Tables: `tables'"
+
+*Append the yearly files for each ACS table
+display "Now checking filenames against the table list"
+ 
+ foreach active_table in `tables' {
+ 
+	clear
+	display "Active Table: `active_table'"
+
+	foreach active_file in `datafiles' {
+		
+		display "Active file: `active_file'"
+		local filename_truncated = subinstr(`"`active_file'"', `"_with_ann.csv.dta"', "", .)
+		local file_table_name = substr("`filename_truncated'", 12, .)
+		display "Current file based on table: `file_table_name'"
+		
+		if `: list active_table == file_table_name' {
+			append using `active_file', force
+			save `active_table', replace
+		}
+	}
+}
+	
+
+
+**THIS SECTION MERGES THE APPENDED DATASETS (MULTIPLE ACS TABLES GO INTO ONE .DTA FILE)
+
+
+*Remove the separate yearly files, which are intermediary and not needed, so they don't get pulled into the merge
+shell del *.csv.dta
+
+clear
+
+local datafiles : dir . files  "*.dta"
+local n : word count `datafiles'
+local n_1 : word 1 of `datafiles'
+
+use `n_1'
+
+forvalues i = 2/`n' {
+
+	local using_file : word `i' of `datafiles'
+	display "Merging using: `using_file'"
+	merge 1:1 sample_yrs geoid2 year using `using_file', nogenerate
+} 
+
+*Order the Population variable as the first one after the identifier variables
+capture order hd01_vd01_b01003, after(geodisplaylabel)
+
+*Sort and save
+sort sample_yrs geoid2 year
+save appended_merged_data
+
+
+**THIS SECTION CLEANS UP THE FILES
+
+
+mkdir ./Downloads
+shell move *.csv ./Downloads
+shell move *.txt ./Downloads
+shell move *.zip ./Downloads
+
+
+
+**THIS SECTION PREPARES THE DATASET
+
+
+
+*Optionally, this loop drops Margin of Error variables
+foreach var of varlist _all {
+	local var_label "`: variable label `var''" 	// Identify the variable labels
+	if strmatch("`var_label'", "*Margin of Error*") drop `var'
+}
+
+*Identify PUMAs in NYC
+gen byte nyc_puma = 1 if inlist(geoid2,	///
+	3603710	,	///
+	3603705	,	///
+	3603708	,	///
+	3603707	,	///
+	3603706	,	///
+	3603701	,	///
+	3603709	,	///
+	3603703	,	///
+	3603704	,	///
+	3603702	,	///
+	3604001	,	///
+	3604004	,	///
+	3604003	,	///
+	3604002	,	///
+	3604008	,	///
+	3604005	,	///
+	3604012	,	///
+	3604006	,	///
+	3604011	,	///
+	3604013	,	///
+	3604017	,	///
+	3604014	,	///
+	3604018	,	///
+	3604015	,	///
+	3604016	,	///
+	3604007	,	///
+	3604010	,	///
+	3604009	,	///
+	3603810	,	///
+	3603809	,	///
+	3603807	,	///
+	3603808	,	///
+	3603806	,	///
+	3603805	,	///
+	3603802	,	///
+	3603803	,	///
+	3603804	,	///
+	3603801	,	///
+	3604101	,	///
+	3604109	,	///
+	3604102	,	///
+	3604107	,	///
+	3604110	,	///
+	3604108	,	///
+	3604103	,	///
+	3604106	,	///
+	3604111	,	///
+	3604113	,	///
+	3604104	,	///
+	3604112	,	///
+	3604105	,	///
+	3604114	,	///
+	3603903	,	///
+	3603902	,	///
+	3603901	)
+
+label var nyc_puma "NYC PUMA Indicator"
+	
+	
+*Keep only NYC geographies
+keep if geoid2 == 3651000	///		New York City
+	| geoid2 == 36005		///		Bronx County
+	| geoid2 == 36047		///		Kings County
+	| geoid2 == 36061		///		New York County
+	| geoid2 == 36081		///		Queens County
+	| geoid2 == 36085		///		Richmond County
+	| nyc_puma == 1
+
+*Rename NYC geographies
+replace geodisplaylabel = "New York City" if geoid2 == 3651000
+replace geodisplaylabel = "Bronx" if geoid2 == 36005
+replace geodisplaylabel = "Brooklyn" if geoid2 == 36047
+replace geodisplaylabel = "Manhattan" if geoid2 == 36061
+replace geodisplaylabel = "Queens" if geoid2 == 36081
+replace geodisplaylabel = "Staten Island" if geoid2 == 36085
+
+*Replace PUMA names.
+replace	geodisplaylabel	=	"BX 1 & 2"	if	geoid2	==	3603710
+replace	geodisplaylabel	=	"BX 3 & 6"	if	geoid2	==	3603705
+replace	geodisplaylabel	=	"BX 4"		if	geoid2	==	3603708
+replace	geodisplaylabel	=	"BX 5"		if	geoid2	==	3603707
+replace	geodisplaylabel	=	"BX 7"		if	geoid2	==	3603706
+replace	geodisplaylabel	=	"BX 8"		if	geoid2	==	3603701
+replace	geodisplaylabel	=	"BX 9"		if	geoid2	==	3603709
+replace	geodisplaylabel	=	"BX 10"		if	geoid2	==	3603703
+replace	geodisplaylabel	=	"BX 11"		if	geoid2	==	3603704
+replace	geodisplaylabel	=	"BX 12"		if	geoid2	==	3603702
+replace	geodisplaylabel	=	"BK 1"		if	geoid2	==	3604001
+replace	geodisplaylabel	=	"BK 2"		if	geoid2	==	3604004
+replace	geodisplaylabel	=	"BK 3"		if	geoid2	==	3604003
+replace	geodisplaylabel	=	"BK 4"		if	geoid2	==	3604002
+replace	geodisplaylabel	=	"BK 5"		if	geoid2	==	3604008
+replace	geodisplaylabel	=	"BK 6"		if	geoid2	==	3604005
+replace	geodisplaylabel	=	"BK 7"		if	geoid2	==	3604012
+replace	geodisplaylabel	=	"BK 8"		if	geoid2	==	3604006
+replace	geodisplaylabel	=	"BK 9"		if	geoid2	==	3604011
+replace	geodisplaylabel	=	"BK 10"		if	geoid2	==	3604013
+replace	geodisplaylabel	=	"BK 11"		if	geoid2	==	3604017
+replace	geodisplaylabel	=	"BK 12"		if	geoid2	==	3604014
+replace	geodisplaylabel	=	"BK 13"		if	geoid2	==	3604018
+replace	geodisplaylabel	=	"BK 14"		if	geoid2	==	3604015
+replace	geodisplaylabel	=	"BK 15"		if	geoid2	==	3604016
+replace	geodisplaylabel	=	"BK 16"		if	geoid2	==	3604007
+replace	geodisplaylabel	=	"BK 17"		if	geoid2	==	3604010
+replace	geodisplaylabel	=	"BK 18"		if	geoid2	==	3604009
+replace	geodisplaylabel	=	"MN 1 & 2"	if	geoid2	==	3603810
+replace	geodisplaylabel	=	"MN 3"		if	geoid2	==	3603809
+replace	geodisplaylabel	=	"MN 4 & 5"	if	geoid2	==	3603807
+replace	geodisplaylabel	=	"MN 6"		if	geoid2	==	3603808
+replace	geodisplaylabel	=	"MN 7"		if	geoid2	==	3603806
+replace	geodisplaylabel	=	"MN 8"		if	geoid2	==	3603805
+replace	geodisplaylabel	=	"MN 9"		if	geoid2	==	3603802
+replace	geodisplaylabel	=	"MN 10"		if	geoid2	==	3603803
+replace	geodisplaylabel	=	"MN 11"		if	geoid2	==	3603804
+replace	geodisplaylabel	=	"MN 12"		if	geoid2	==	3603801
+replace	geodisplaylabel	=	"QN 1"		if	geoid2	==	3604101
+replace	geodisplaylabel	=	"QN 2"		if	geoid2	==	3604109
+replace	geodisplaylabel	=	"QN 3"		if	geoid2	==	3604102
+replace	geodisplaylabel	=	"QN 4"		if	geoid2	==	3604107
+replace	geodisplaylabel	=	"QN 5"		if	geoid2	==	3604110
+replace	geodisplaylabel	=	"QN 6"		if	geoid2	==	3604108
+replace	geodisplaylabel	=	"QN 7"		if	geoid2	==	3604103
+replace	geodisplaylabel	=	"QN 8"		if	geoid2	==	3604106
+replace	geodisplaylabel	=	"QN 9"		if	geoid2	==	3604111
+replace	geodisplaylabel	=	"QN 10"		if	geoid2	==	3604113
+replace	geodisplaylabel	=	"QN 11"		if	geoid2	==	3604104
+replace	geodisplaylabel	=	"QN 12"		if	geoid2	==	3604112
+replace	geodisplaylabel	=	"QN 13"		if	geoid2	==	3604105
+replace	geodisplaylabel	=	"QN 14"		if	geoid2	==	3604114
+replace	geodisplaylabel	=	"SI 1"		if	geoid2	==	3603903
+replace	geodisplaylabel	=	"SI 2"		if	geoid2	==	3603902
+replace	geodisplaylabel	=	"SI 3"		if	geoid2	==	3603901
+
+*Resize the box in the datasheet that shows geodisplay label
+format geodisplaylabel %15s
+
+*Create dummy variables to identify city, county, and PUMA geographies
+gen byte city = cond(geoid2 == 3651000, 1, 0)
+gen byte borough = cond(inlist(geoid2, 36005, 36047, 36061, 36081, 36085), 1, 0)
+gen byte puma = cond(nyc_puma == 1, 1, 0)
+
+label var city "City Indicator"
+char city[description] "City Indicator"
+label var borough "County Indicator"
+char borough[description] "County Indicator"
+label var puma "PUMA (Community District)"
+char puma[description] "PUMA (Community District)"
+
+*Organize the variables
+order city borough puma, after(geodisplaylabel)
+
+*Drop nyc_puma, which is no longer needed
+drop nyc_puma
+
+
+*Sort based on the geographies
+gsort + sample_yrs - city - borough + geoid2 + year
+	
+*Save the dataset. This will be the main dataset.
+save nyc_main_data, replace
+
+
+
+**THIS SECTION PREPARES THE CSV FOR EXPORT
+
+
+
+*Prepare the dataset for putting the variable descriptions back into it
+
+*Format the variables so that all decimal places are shown
+	*Required for -tostring- function if any variables contain decimals
+foreach var of varlist _all {
+
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough", ///
+			"hd01_vd01_b01003") == 0 {
+			format `var' %25.20f
+	}	
+}
+
+*Change all variables to string variables and create a new row for the descriptions
+tostring _all, replace usedisplayformat
+local new = _N + 1
+set obs `new'
+
+*Put the variable descriptions back into the dataset
+foreach var of varlist _all{
+	local description : char `var'[description]
+	replace `var' = `"`description'"' in `new'
+}
+
+*Move the descriptions to the top row
+gen sort_order = 1 in `new'
+gsort + sort_order + sample_yrs - city - borough + geoid2 year
+drop sort_order
+
+*Export to CSV
+outsheet using nyc_main_data.csv, comma replace
+
+
+
+**THIS SECTION SETS UP THE PANEL DATA**
+
+
+use nyc_main_data, clear
+
+*Set geoid2 as the panel variable and year as the time variable
+*If you have multiple sample lengths in the dataset (e.g., 1-Year and 3-Year together),
+	*You will get an error at this point: "repeated time values within panel"
+	*The graphs section that comes after this will behave incorrectly if you have multiple sample lengths in the dataset
+		**Solution: Separate the .csv files for the different sample lengths into different folders
+			*and rerun the whole program for each folder
+tsset geoid2 year
+
+
+
+**THIS SECTION CREATES GRAPHS FOR ANALYSIS**
+
+
+
+*Create a folder to store the graphs
+mkdir ./Graphs
+mkdir ./Graphs/Borough
+mkdir ./Graphs/PUMA
+mkdir ./Graphs/Time
+
+
+
+*CROSS-SECTIONAL BY BOROUGH*
+
+
+*Graph all variables by borough for the most recent year
+
+
+*Find the most recent year, which then goes into the graph
+quietly summarize year
+local latest_year = r(max)
+
+set more off
+foreach var of varlist _all {
+
+	*Break the variable descriptions from the vaiable characteristic called "description" into
+		*80-character (or so) blocks for use in the graph title
+
+	display `"Currently on: `var'"'
+	local var_char : char `var'[description]
+	local var_char1 : piece 1 75 of `"`var_char'"', nobreak
+	local var_char2 : piece 2 75 of `"`var_char'"', nobreak
+	local var_char3 : piece 3 75 of `"`var_char'"', nobreak
+	
+	*Remove special characters (ones that can't be used in file names) from the variable description
+	strclean `"`var_char'"'
+	local label_rename = s(text_rename)
+		
+	*Exclude those variables that are only identifiers
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough") == 0 	///
+		& strmatch("`var'", "*_rank") == 0 {
+		
+		*Create the graph and save it
+		capture graph bar `var' if borough == 1 & year == `latest_year', over(geodisplaylabel)			///
+			blabel(bar, format(%15.0gc)) ylabel(, format(%15.0gc) angle(0)) ytitle("")					///
+			title(`"`var_char1'"' `"`var_char2'"' `"`var_char3'"', size(medium)) 						///
+			caption(" " `"`latest_year' by Borough (`var')"')
+		
+		capture graph export `"./Graphs/Borough/`label_rename' (`var') by borough `latest_year'.tif"'
+
+	}
+}
+
+
+*CROSS-SECTIONAL BY PUMA*
+
+
+*Graph all variables by PUMA for the most recent year
+
+*Rank the geographies on all variables by year and geography type
+sort year puma borough city
+foreach var of varlist _all {
+
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough") == 0 {
+
+		display "Currently on `var'"
+		egen `var'_rank = rank(`var'), field by(year puma borough city)
+
+	}
+}
+
+*Find the most recent year, which then goes into the graph
+quietly summarize year
+local latest_year = r(max)
+	
+*Graph the top ten PUMAs for each variable for the latest year
+set more off
+foreach var of varlist _all {
+
+	*Break the variable descriptions from the vaiable characteristic called "description" into
+	*80-character (or so) blocks for use in the graph title
+
+	display `"Currently on: `var'"'
+	local var_char : char `var'[description]
+	local var_char1 : piece 1 75 of `"`var_char'"', nobreak
+	local var_char2 : piece 2 75 of `"`var_char'"', nobreak
+	local var_char3 : piece 3 75 of `"`var_char'"', nobreak
+	
+	*Remove special characters (ones that can't be used in file names) from the variable description
+	strclean `"`var_char'"'
+	local label_rename = s(text_rename)
+	
+	*Exclude those variables that are only identifiers and ranks
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough") == 0 	///
+		& strmatch("`var'", "*_rank") == 0	{
+		
+		capture graph bar `var' if puma == 1 & year == `latest_year' & `var'_rank <= 10, 				///
+			over(geodisplaylabel, sort(1) descending label(angle(45)))									///
+			blabel(bar, format(%15.0gc)) ylabel(, format(%15.0gc) angle(0)) ytitle("")					///
+			title(`"`var_char1'"' `"`var_char2'"' `"`var_char3'"', size(medium))						///
+			caption(" " `"`latest_year' by Top PUMAs (`var')"')
+
+		capture graph export `"./Graphs/PUMA/`label_rename' (`var') by PUMA `latest_year'.tif"'
+
+	}
+}	
+
+
+
+*TIME SERIES BY BOROUGH*
+
+
+
+*Graph all variables by borough over time
+set more off
+foreach var of varlist _all {
+
+	*Exclude those variables that are only identifiers and ranks
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough") == 0 	///
+		& strmatch("`var'", "*_rank") == 0	{
+
+		*Find the oldest and most recent years, which then get used in labelling the graph
+		quietly summarize year if `var' != .
+		local earliest_year = r(min)
+		local latest_year = r(max)	
+
+		*Used in extending the x-axis ranges
+		local one_before = `earliest_year' - 1
+		local one_after = `latest_year' + 1
+
+		*Break the variable descriptions from the vaiable characteristic called "description" into
+		*80-character (or so) blocks for use in the graph title
+
+		display `"Currently on: `var'"'
+		local var_char : char `var'[description]
+		local var_char1 : piece 1 75 of `"`var_char'"', nobreak
+		local var_char2 : piece 2 75 of `"`var_char'"', nobreak
+		local var_char3 : piece 3 75 of `"`var_char'"', nobreak
+		
+		*Remove special characters (ones that can't be used in file names) from the variable description
+		strclean `"`var_char'"'
+		local label_rename = s(text_rename)
+		
+		*Put commas in the variable for the scatter plot marker labels
+		format `var' %15.0gc
+		
+		capture twoway 																										///
+			(line `var' year if geoid2 == 36005) 																			///
+			(scatter `var' year	if geoid2 == 36005 & (year == `latest_year' | year == `earliest_year'),						///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+																															///
+			(line `var' year if geoid2 == 36047)																			///
+			(scatter `var' year	if geoid2 == 36047 & (year == `latest_year' | year == `earliest_year'), 					///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+																															///
+			(line `var' year if geoid2 == 36061, lcolor(cranberry))															///
+			(scatter `var' year	if geoid2 == 36061 & (year == `latest_year' | year == `earliest_year'), 					///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+																															///
+			(line `var' year if geoid2 == 36081, lcolor(gold))																///
+			(scatter `var' year	if geoid2 == 36081 & (year == `latest_year' | year == `earliest_year'), 					///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+																															///
+			(line `var' year if geoid2 == 36085)																			///	
+			(scatter `var' year	if geoid2 == 36085 & (year == `latest_year' | year == `earliest_year'), 					///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+				,																											///
+				xscale(range(`one_before' `one_after'))																		///
+				ylabel(, format(%15.0gc) angle(0)) ytitle("") 																///
+				title(`"`var_char1'"' `"`var_char2'"' `"`var_char3'"', size(medium))										///
+				caption(" " "By Borough Over Time (`var')")																	///																												///
+				legend(label(1 Bronx) label(3 Brooklyn) label(5 Manhattan) label(7 Queens) label(9 Staten Island)			///
+						label(2 "") label(4 "") label(6 "") label(8 "") label(10 "")) 										
+						*I have removed the Borough names (set to "") from the scatter plot part of the legend.
+			
+		capture graph export `"./Graphs/Time/`label_rename' (`var') by borough over time.tif"'
+
+	}
+}	
+
+
+***EVERYTHING BELOW IS FOR WORKING WITH PERCENTAGES OF THE POPULATION***
+	*This part of the program treats all variables as percentages of the total population
+	*For certain variables, a different population figure might be more appropriate
+	*For example, for data relating to commuting, total workers would be more appropriate
+	*This section can be changed based on those needs.
+
+
+**THIS SECTION CREATES A DATASET OF PERCENT POPULATION VARIABLES
+
+
+
+use nyc_main_data, clear
+
+*For all variables other than identifier variables, transform the values to be percent population values
+foreach var of varlist _all {
+
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough", ///
+		"hd01_vd01_b01003") == 0 {
+		
+		replace `var' = `var' / hd01_vd01_b01003 * 100
+		format `var' %10.1f
+
+	}
+}
+
+save nyc_main_data_pct, replace
+
+
+
+**THIS SECTION PREPARES THE CSV FOR EXPORT
+
+
+
+use nyc_main_data_pct, clear
+
+*Prepare the dataset for putting the variable descriptions back into it
+
+*Format the variables so that all decimal places are shown
+	*Required for -tostring- function if any variables contain decimals
+foreach var of varlist _all {
+
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough", ///
+			"hd01_vd01_b01003") == 0 {
+			format `var' %25.20f
+	}	
+}
+
+*Change all variables to string variables and create a new row for the descriptions
+tostring _all, replace usedisplayformat
+local new = _N + 1
+set obs `new'
+
+*Put the variable descriptions back into the dataset
+foreach var of varlist _all{
+	local description : char `var'[description]
+	replace `var' = `"`description'"' in `new'
+}
+
+*Move the descriptions to the top row
+gen sort_order = 1 in `new'
+gsort + sort_order + sample_yrs - city - borough + geoid2 year
+drop sort_order
+
+*Export to CSV
+outsheet using nyc_main_data_pct.csv, comma replace
+
+
+
+**THIS SECTION SETS UP THE PANEL DATA**
+
+
+use nyc_main_data_pct, clear
+
+*Set geoid2 as the panel variable and year as the time variable
+*If you have multiple sample lengths in the dataset (e.g., 1-Year and 3-Year together),
+	*You will get an error at this point: "repeated time values within panel"
+	*The graphs section that comes after this will behave incorrectly if you have multiple sample lengths in the dataset
+		**Solution: Separate the .csv files for the different sample lengths into different folders
+			*and rerun the whole program for each folder
+tsset geoid2 year
+
+
+
+**THIS SECTION CREATES GRAPHS FOR ANALYSIS**
+
+
+
+*Create a folder to store the graphs
+capture mkdir ./Graphs
+mkdir ./Graphs/Borough_Pct
+mkdir ./Graphs/PUMA_Pct
+mkdir ./Graphs/Time_Pct
+
+
+
+*CROSS-SECTIONAL BY BOROUGH*
+
+
+*Graph all variables by borough for the most recent year
+
+
+*Find the most recent year, which then goes into the graph
+quietly summarize year
+local latest_year = r(max)
+
+set more off
+foreach var of varlist _all {
+
+	*Break the variable descriptions from the vaiable characteristic called "description" into
+		*80-character (or so) blocks for use in the graph title
+
+	display `"Currently on: `var'"'
+	local var_char : char `var'[description]
+	local var_char1 : piece 1 75 of `"`var_char'"', nobreak
+	local var_char2 : piece 2 75 of `"`var_char'"', nobreak
+	local var_char3 : piece 3 75 of `"`var_char'"', nobreak
+	
+	*Remove special characters (ones that can't be used in file names) from the variable description
+	strclean `"`var_char'"'
+	local label_rename = s(text_rename)
+		
+	*Exclude those variables that are only identifiers
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough") == 0 	///
+		& strmatch("`var'", "*_rank") == 0 {
+		
+		*Create the graph and save it
+		capture graph bar `var' if borough == 1 & year == `latest_year', over(geodisplaylabel) 			///
+			blabel(bar, format(%15.1f)) ylabel(, format(%15.1f) angle(0)) ytitle("")					///
+			title(`"`var_char1'"' `"`var_char2'"' `"`var_char3'"', size(medium)) 						///
+			caption(" " "Percent of Population" `"`latest_year' by Borough (`var')"')
+		
+		capture graph export `"./Graphs/Borough_Pct/`label_rename' (`var') by borough `latest_year'.tif"'
+
+	}
+}
+
+
+*CROSS-SECTIONAL BY PUMA*
+
+
+*Graph all variables by PUMA for the most recent year
+
+*Rank the geographies on all variables by year and geography type
+sort year puma borough city
+foreach var of varlist _all {
+
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough") == 0 {
+
+		display "Currently on `var'"
+		egen `var'_rank = rank(`var'), field by(year puma borough city)
+
+	}
+}
+
+*Find the most recent year, which then goes into the graph
+quietly summarize year
+local latest_year = r(max)
+	
+*Graph the top ten PUMAs for each variable for the latest year
+set more off
+foreach var of varlist _all {
+
+	*Break the variable descriptions from the vaiable characteristic called "description" into
+	*80-character (or so) blocks for use in the graph title
+
+	display `"Currently on: `var'"'
+	local var_char : char `var'[description]
+	local var_char1 : piece 1 75 of `"`var_char'"', nobreak
+	local var_char2 : piece 2 75 of `"`var_char'"', nobreak
+	local var_char3 : piece 3 75 of `"`var_char'"', nobreak
+	
+	*Remove special characters (ones that can't be used in file names) from the variable description
+	strclean `"`var_char'"'
+	local label_rename = s(text_rename)
+	
+	*Exclude those variables that are only identifiers and ranks
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough") == 0 	///
+		& strmatch("`var'", "*_rank") == 0	{
+		
+		capture graph bar `var' if puma == 1 & year == `latest_year' & `var'_rank <= 10, 				///
+			over(geodisplaylabel, sort(1) descending label(angle(45)))									///
+			blabel(bar, format(%15.1f)) ylabel(, format(%15.1f) angle(0)) ytitle("")					///
+			title(`"`var_char1'"' `"`var_char2'"' `"`var_char3'"', size(medium))						///
+			caption(" " "Percent of Population" `"`latest_year' by Top PUMAs (`var')"')
+
+		capture graph export `"./Graphs/PUMA_Pct/`label_rename' (`var') by PUMA `latest_year'.tif"'
+
+	}
+}	
+
+
+
+*TIME SERIES BY BOROUGH*
+
+
+
+*Graph all variables by borough over time
+set more off
+foreach var of varlist _all {
+
+	*Exclude those variables that are only identifiers and ranks
+	if inlist("`var'", "year", "sample_yrs", "geoid", "geoid2", "geodisplaylabel", "puma", "city", "borough") == 0 	///
+		& strmatch("`var'", "*_rank") == 0	{
+		
+		*Find the oldest and most recent years, which then get used in labelling the graph
+		quietly summarize year if `var' != .
+		local earliest_year = r(min)
+		local latest_year = r(max)	
+
+		*Used in extending the x-axis ranges
+		local one_before = `earliest_year' - 1
+		local one_after = `latest_year' + 1
+		
+		*Break the variable descriptions from the vaiable characteristic called "description" into
+		*80-character (or so) blocks for use in the graph title
+
+		display `"Currently on: `var'"'
+		local var_char : char `var'[description]
+		local var_char1 : piece 1 75 of `"`var_char'"', nobreak
+		local var_char2 : piece 2 75 of `"`var_char'"', nobreak
+		local var_char3 : piece 3 75 of `"`var_char'"', nobreak
+		
+		*Remove special characters (ones that can't be used in file names) from the variable description
+		strclean `"`var_char'"'
+		local label_rename = s(text_rename)
+				
+		*Format the variable for the scatter plot marker labels
+		format `var' %15.1f
+		
+		capture twoway 																										///
+			(line `var' year if geoid2 == 36005) 																			///
+			(scatter `var' year	if geoid2 == 36005 & (year == `latest_year' | year == `earliest_year'),						///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+																															///
+			(line `var' year if geoid2 == 36047)																			///
+			(scatter `var' year	if geoid2 == 36047 & (year == `latest_year' | year == `earliest_year'), 					///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+																															///
+			(line `var' year if geoid2 == 36061, lcolor(cranberry))															///
+			(scatter `var' year	if geoid2 == 36061 & (year == `latest_year' | year == `earliest_year'), 					///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+																															///
+			(line `var' year if geoid2 == 36081, lcolor(gold))																///
+			(scatter `var' year	if geoid2 == 36081 & (year == `latest_year' | year == `earliest_year'), 					///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+																															///
+			(line `var' year if geoid2 == 36085)																			///	
+			(scatter `var' year	if geoid2 == 36085 & (year == `latest_year' | year == `earliest_year'), 					///
+				msymbol(none) mlabel(`var') mlabcolor(black) mlabsize(small) mlabangle(0) mlabpos(6))						///	
+				,																											///
+				xscale(range(`one_before' `one_after'))																		///
+				ylabel(, format(%15.1f) angle(0)) ytitle("") 																///
+				title(`"`var_char1'"' `"`var_char2'"' `"`var_char3'"', size(medium))										///
+				caption(" " "Percent of Population" "By Borough Over Time (`var')")																	///																												///
+				legend(label(1 Bronx) label(3 Brooklyn) label(5 Manhattan) label(7 Queens) label(9 Staten Island)			///
+						label(2 "") label(4 "") label(6 "") label(8 "") label(10 "")) 										
+						*I have removed the Borough names (set to "") from the scatter plot part of the legend.
+			
+		capture graph export `"./Graphs/Time_Pct/`label_rename' (`var') by borough over time.tif"'
+
+	}
+}	
